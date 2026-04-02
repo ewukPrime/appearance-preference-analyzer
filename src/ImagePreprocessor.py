@@ -1,59 +1,43 @@
-import mediapipe as mp
-from mediapipe.tasks import python as mpp
-from mediapipe.tasks.python import vision as mpv
-import numpy as np
-import cv2
-from pathlib import Path
-from rembg import remove, new_session
 import torch
+import numpy as np
 from PIL import Image
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
+from pathlib import Path
+from loguru import logger
+import cv2
+
 
 
 class ImagePreprocessor:
-    def __init__(self, path_image):
-        self.bgr_image = bgr_image = cv2.imread(path_image)
-        self.rgb_image = rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-        self.mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
-        
+    def __init__(self):
+        data_dir = Path('data/logs')
+        logger.add(data_dir / 'ImagePreprocessor.log', rotation='1 MB', level='DEBUG', encoding='utf-8')
 
-
-    def without_background(self):
-        bgr_image = self.bgr_image
-        image = self.mp_image
-        base_options = mpp.BaseOptions(model_asset_path='models/deeplab_v3.tflite')
-        options = mpv.ImageSegmenterOptions(
-            base_options=base_options,
-            running_mode=mpv.RunningMode.IMAGE,
-            output_category_mask=True,
-            output_confidence_masks=True
-        )
-
-        with mpv.ImageSegmenter.create_from_options(options) as segmenter:
-            result = segmenter.segment(image)
-
-        mask = result.category_mask.numpy_view()
-        cv2.imshow('Selfie Mask', cv2.bitwise_and(bgr_image, bgr_image, mask=mask))
-        cv2.waitKey(0)
+        logger.info('Сессия начата')
 
 
 
-    def without_background2(self):
-        # session = new_session('isnet-general-use')
-        result = remove(self.bgr_image)
+    def without_background(self, img_path):
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        model_cfg = "C:/Dev/MainProject2/.venv/Lib/site-packages/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+        model_weights = "models/sam2.1_l.pt"
+        predictor = SAM2ImagePredictor(build_sam2(model_cfg, model_weights, device=device))
 
-        cv2.imshow('Rembg Result', result)
-        cv2.waitKey(0)
+        image = Image.open(img_path).convert('RGB')
+        img_array = np.array(image)
+        predictor.set_image(img_array)
 
 
 
 
-    def without_background3(self, img_path):
+
+
+    def without_background2(self, img_path):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         # Путь к конфигу и весам (используем ваши версии 2.1)
         model_cfg = "C:/Dev/MainProject2/.venv/Lib/site-packages/sam2/configs/sam2.1/sam2.1_hiera_l.yaml" 
-        sam2_checkpoint = "sam2.1_l.pt"
+        sam2_checkpoint = "models/sam2.1_l.pt"
 
         predictor = SAM2ImagePredictor(build_sam2(model_cfg, sam2_checkpoint, device=device))
 
@@ -113,8 +97,33 @@ class ImagePreprocessor:
 
         final_img = img_float.astype(np.uint8)
         result = Image.fromarray(final_img)
-        result.save("output_for_clip.jpg")
+        result.save("data/output_for_clip.jpg")
 
 
 
+    # def without_background3(self):
+    #     bgr_image = self.bgr_image
+    #     image = self.mp_image
+    #     base_options = mpp.BaseOptions(model_asset_path='models/deeplab_v3.tflite')
+    #     options = mpv.ImageSegmenterOptions(
+    #         base_options=base_options,
+    #         running_mode=mpv.RunningMode.IMAGE,
+    #         output_category_mask=True,
+    #         output_confidence_masks=True
+    #     )
 
+    #     with mpv.ImageSegmenter.create_from_options(options) as segmenter:
+    #         result = segmenter.segment(image)
+
+    #     mask = result.category_mask.numpy_view()
+    #     cv2.imshow('Selfie Mask', cv2.bitwise_and(bgr_image, bgr_image, mask=mask))
+    #     cv2.waitKey(0)
+
+
+
+    # def without_background2(self):
+    #     # session = new_session('isnet-general-use')
+    #     result = remove(self.bgr_image)
+
+    #     cv2.imshow('Rembg Result', result)
+    #     cv2.waitKey(0)

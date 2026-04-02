@@ -11,6 +11,4 @@ wheels/
 
 #File
 data/
-sam2.1_s.pt
-sam2.1_l.pt
-output_for_clip.jpg
+models/
