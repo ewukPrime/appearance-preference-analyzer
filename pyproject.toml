@@ -7,5 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "loguru>=0.7.3",
     "mediapipe>=0.10.33",
+    "numpy>=2.4.4",
     "pathlib>=1.0.1",
+    "rembg[gpu]>=2.0.74",
 ]
