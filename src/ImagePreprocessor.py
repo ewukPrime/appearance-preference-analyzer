@@ -6,28 +6,73 @@ from sam2.sam2_image_predictor import SAM2ImagePredictor
 from pathlib import Path
 from loguru import logger
 import cv2
-
-
+from groundingdino.util.inference import load_model, load_image, predict
+from groundingdino.util.box_ops import box_cxcywh_to_xyxy
+import supervision as sv
+from torchvision.ops import box_convert
 
 class ImagePreprocessor:
     def __init__(self):
         data_dir = Path('data/logs')
         logger.add(data_dir / 'ImagePreprocessor.log', rotation='1 MB', level='DEBUG', encoding='utf-8')
-
         logger.info('Сессия начата')
 
 
 
     def without_background(self, img_path):
+        logger.info('Начало обрезания фона')
+
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        model_cfg = "C:/Dev/MainProject2/.venv/Lib/site-packages/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
-        model_weights = "models/sam2.1_l.pt"
-        predictor = SAM2ImagePredictor(build_sam2(model_cfg, model_weights, device=device))
+        sam_cfg = "C:/Dev/MainProject2/.venv/Lib/site-packages/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+        sam_weights = "models/sam2.1_l.pt"
+        predictor = SAM2ImagePredictor(build_sam2(sam_cfg, sam_weights, device=device))
 
         image = Image.open(img_path).convert('RGB')
-        img_array = np.array(image)
-        predictor.set_image(img_array)
+        image = np.array(image)
+        predictor.set_image(image)
+        h, w, _= image.shape
 
+        dino_model = load_model("C:/Dev/MainProject2/.venv/Lib/site-packages/groundingdino/config/GroundingDINO_SwinT_OGC.py", "models/groundingdino_swint_ogc.pth")
+        _, image_tensor = load_image(img_path)
+        text_promt = "girl ."
+        boxes, logits, phrases = predict(
+            model=dino_model,
+            image=image_tensor,
+            caption=text_promt,
+            box_threshold=0.1,
+            text_threshold=0.1,
+            device=device
+        )
+        if boxes.numel() > 0:
+            boxes = box_convert(boxes, in_fmt='cxcywh', out_fmt='xyxy')
+            boxes = boxes.cpu().numpy() * np.array([w, h, w, h])
+        else: logger.error("Объекта не найдено!")
+
+        masks, scores, _ = predictor.predict(
+            box=boxes[0:1], 
+            multimask_output=False
+        )
+        mask = masks.squeeze()
+
+
+
+
+        # input_point = np.array([[w/2, h/2]])
+        # input_label = np.array([1])
+        # masks, scores, _ = predictor.predict(point_coords=input_point, point_labels=input_label)
+        # mask = masks[np.argmax(scores)]
+
+
+
+        bg_color = np.array([128, 128, 128])
+        image = image.astype(float)
+        
+        final_img = (image * np.expand_dims(mask, axis=2) + bg_color * (1 - np.expand_dims(mask, axis=2))).astype(np.uint8)
+
+        result = Image.fromarray(final_img)
+
+        logger.success('Фон обрезан')
+        result.save("data/output_for_clip.jpg")
 
 
 

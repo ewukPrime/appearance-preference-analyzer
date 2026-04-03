@@ -3,13 +3,16 @@ name = "mainproject2"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
+    "groundingdino-py>=0.4.0",
     "loguru>=0.7.3",
     "numpy>=2.4.4",
     "opencv-python>=4.13.0.92",
     "pathlib>=1.0.1",
     "sam-2",
+    "supervision>=0.6.0",
+    "transformers==4.28.1",
 ]
 
 [tool.uv.sources]
