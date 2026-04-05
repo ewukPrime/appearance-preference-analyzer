@@ -7,9 +7,9 @@ from pathlib import Path
 from loguru import logger
 import cv2
 from groundingdino.util.inference import load_model, load_image, predict
-from groundingdino.util.box_ops import box_cxcywh_to_xyxy
 import supervision as sv
 from torchvision.ops import box_convert
+import sys
 
 class ImagePreprocessor:
     def __init__(self):
@@ -17,9 +17,154 @@ class ImagePreprocessor:
         logger.add(data_dir / 'ImagePreprocessor.log', rotation='1 MB', level='DEBUG', encoding='utf-8')
         logger.info('Сессия начата')
 
+        current_dir = Path(__file__).parent.parent.resolve()
+        depth_anything_path = current_dir / "data" / "Depth-Anything-V2"
+        if str(depth_anything_path) not in sys.path:
+            sys.path.append(str(depth_anything_path))
+        
+        from depth_anything_v2.dpt import DepthAnythingV2
+        
+        
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        model_configs = {'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]}}
+
+        self.depth_model = DepthAnythingV2(**model_configs['vits'])
+        weights_path = current_dir / "models" / "depth_anything_v2_vits.pth"
+        self.depth_model.load_state_dict(torch.load(weights_path, map_location=self.device))
+        self.depth_model.to(self.device).eval()
+
+
+
+    def refine_mask_with_depth(self, image, sam_mask, box):
+        """
+        Улучшает маску SAM с помощью карты глубины.
+        sam_mask: бинарная маска от SAM (0 или 255)
+        box: [x1, y1, x2, y2] от GroundingDINO
+        """
+        logger.info("Уточнение маски с помощью Depth Anything V2...")
+        
+        # 1. Получаем карту глубины (превращаем в 0-255 для удобства)
+        # image должен быть в формате RGB numpy
+        depth_map = self.depth_model.infer_image(image) 
+        depth_norm = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+        # 2. Определяем "эталонную" глубину объекта
+        # Берем медиану глубины только там, где SAM на 100% уверен в объекте
+        object_depths = depth_norm[sam_mask > 0]
+        if len(object_depths) == 0:
+            return sam_mask # Если SAM вообще ничего не нашел
+            
+        median_depth = np.median(object_depths)
+
+        # 3. Создаем маску по глубине (все, что находится рядом с объектом)
+        # tolerance (порог) — чем меньше, тем строже отсечение фона. 
+        # Обычно 15-25 хватает, чтобы "схватить" хлеб и руки.
+        tolerance = 20 
+        depth_mask = cv2.inRange(depth_norm, median_depth - tolerance, median_depth + tolerance)
+
+        # 4. ГЛАВНЫЙ ШАГ: Комбинируем маски
+        # Мы доверяем SAM, но расширяем его маску за счет глубины только ВНУТРИ бокса
+        refined_mask = sam_mask.copy()
+        
+        x1, y1, x2, y2 = map(int, box)
+        # Берем область внутри бокса и применяем логическое ИЛИ с маской глубины
+        roi_depth = depth_mask[y1:y2, x1:x2]
+        roi_sam = refined_mask[y1:y2, x1:x2]
+        
+        # Объединяем: если пиксель есть ИЛИ в SAM, ИЛИ в Depth — оставляем
+        refined_mask[y1:y2, x1:x2] = cv2.bitwise_or(roi_sam, roi_depth)
+
+        # 5. Очистка (небольшое размытие для мягкого края)
+        refined_mask = cv2.GaussianBlur(refined_mask, (5, 5), 0)
+        
+        return refined_mask
+
 
 
     def without_background(self, img_path):
+        logger.info('Начало обрезания фона')
+
+        sam_cfg = "C:/Dev/MainProject2/.venv/Lib/site-packages/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+        sam_weights = "models/sam2.1_l.pt"
+        predictor = SAM2ImagePredictor(build_sam2(sam_cfg, sam_weights, device=self.device))
+
+        image = Image.open(img_path).convert('RGB')
+        image = np.array(image)
+        predictor.set_image(image)
+        h, w, _= image.shape
+
+        dino_model = load_model("C:/Dev/MainProject2/.venv/Lib/site-packages/groundingdino/config/GroundingDINO_SwinT_OGC.py", "models/groundingdino_swint_ogc.pth")
+        _, image_tensor = load_image(img_path)
+        text_promt = "girl ."
+        boxes, _, _ = predict(
+            model=dino_model,
+            image=image_tensor,
+            caption=text_promt,
+            box_threshold=0.3,
+            text_threshold=0.3,
+            device=self.device
+        )
+
+        if boxes.numel() > 0:
+            boxes = box_convert(boxes, in_fmt='cxcywh', out_fmt='xyxy')
+            boxes = boxes.cpu().numpy() * np.array([w, h, w, h])
+        else: logger.error("Объекта не найдено!")
+        x1, y1, x2, y2 = boxes[0]
+        pading = 40
+        x1, y1 = max(0, x1 - pading), max(0, y1 - pading)
+        x2, y2 = min(w, x2 + pading), min(h, y2 + pading)
+        boxes[0] = [x1, y1, x2, y2]
+
+        masks, scores, _ = predictor.predict(
+            box=boxes[0:1],
+            point_coords=np.array([[(x1+x2)/2, (y1+y2)/2]]),
+            point_labels=np.array([1]),
+            multimask_output=False
+        )
+        # masks = np.any(masks, axis=0)
+        mask = masks[0].squeeze()
+        # mask = np.any(masks, axis=0)
+        # mask = ndimage.binary_fill_holes(mask)
+        mask = mask.astype(np.uint8)
+
+        mask = self.refine_mask_with_depth(image, mask, boxes[0])
+
+
+
+        # input_point = np.array([[w/2, h/2]])
+        # input_label = np.array([1])
+        # masks, scores, _ = predictor.predict(point_coords=input_point, point_labels=input_label)
+        # mask = masks[np.argmax(scores)].astype(np.uint8) * 255
+
+
+
+        # kernel = np.ones((3, 3), np.uint8)
+        # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+        # contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # filled_mask = np.zeros_like(mask)
+        # cv2.drawContours(filled_mask, contours=contours, contourIdx=-1, color=255, thickness=cv2.FILLED)
+        # mask = (filled_mask / 255.0)
+
+        # blur_size = 5
+        # mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
+        
+        # logger.success(f"{x1}, {y1}, {x2}, {y2}")
+
+        bg_color = np.array([128, 128, 128])
+        image = image.astype(float)
+        
+        final_img = (image * np.expand_dims(mask, axis=2) + bg_color * (1 - np.expand_dims(mask, axis=2))).astype(np.uint8)
+
+        result = Image.fromarray(final_img)
+
+        logger.success('Фон обрезан')
+        result.save("data/output_for_clip.jpg")
+
+
+    def without_background3(self, img_path):
         logger.info('Начало обрезания фона')
 
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -48,7 +193,7 @@ class ImagePreprocessor:
             boxes = boxes.cpu().numpy() * np.array([w, h, w, h])
         else: logger.error("Объекта не найдено!")
 
-        masks, scores, _ = predictor.predict(
+        masks, _, _ = predictor.predict(
             box=boxes[0:1], 
             multimask_output=False
         )
