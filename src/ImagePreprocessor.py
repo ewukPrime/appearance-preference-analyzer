@@ -25,65 +25,33 @@ class ImagePreprocessor:
         from depth_anything_v2.dpt import DepthAnythingV2
         
         
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = 'cuda'
 
-        model_configs = {'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]}}
+        model_configs = {'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]}}
 
-        self.depth_model = DepthAnythingV2(**model_configs['vits'])
-        weights_path = current_dir / "models" / "depth_anything_v2_vits.pth"
+        self.depth_model = DepthAnythingV2(**model_configs['vitl'])
+        weights_path = current_dir / "models" / "depth_anything_v2_vitl.pth"
         self.depth_model.load_state_dict(torch.load(weights_path, map_location=self.device))
         self.depth_model.to(self.device).eval()
 
 
 
-    def refine_mask_with_depth(self, image, sam_mask, box):
-        """
-        Улучшает маску SAM с помощью карты глубины.
-        sam_mask: бинарная маска от SAM (0 или 255)
-        box: [x1, y1, x2, y2] от GroundingDINO
-        """
-        logger.info("Уточнение маски с помощью Depth Anything V2...")
-        
-        # 1. Получаем карту глубины (превращаем в 0-255 для удобства)
-        # image должен быть в формате RGB numpy
-        depth_map = self.depth_model.infer_image(image) 
-        depth_norm = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    def refine_mask_with_depth(self, img_path):
+        image = Image.open(img_path).convert('RGB')
+        image = np.array(image)
 
-        # 2. Определяем "эталонную" глубину объекта
-        # Берем медиану глубины только там, где SAM на 100% уверен в объекте
-        object_depths = depth_norm[sam_mask > 0]
-        if len(object_depths) == 0:
-            return sam_mask # Если SAM вообще ничего не нашел
-            
-        median_depth = np.median(object_depths)
+        depth_map = self.depth_model.infer_image(image)
+        depth_map =  cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        depth_map = cv2.applyColorMap(depth_map, cv2.COLORMAP_MAGMA)
 
-        # 3. Создаем маску по глубине (все, что находится рядом с объектом)
-        # tolerance (порог) — чем меньше, тем строже отсечение фона. 
-        # Обычно 15-25 хватает, чтобы "схватить" хлеб и руки.
-        tolerance = 20 
-        depth_mask = cv2.inRange(depth_norm, median_depth - tolerance, median_depth + tolerance)
-
-        # 4. ГЛАВНЫЙ ШАГ: Комбинируем маски
-        # Мы доверяем SAM, но расширяем его маску за счет глубины только ВНУТРИ бокса
-        refined_mask = sam_mask.copy()
-        
-        x1, y1, x2, y2 = map(int, box)
-        # Берем область внутри бокса и применяем логическое ИЛИ с маской глубины
-        roi_depth = depth_mask[y1:y2, x1:x2]
-        roi_sam = refined_mask[y1:y2, x1:x2]
-        
-        # Объединяем: если пиксель есть ИЛИ в SAM, ИЛИ в Depth — оставляем
-        refined_mask[y1:y2, x1:x2] = cv2.bitwise_or(roi_sam, roi_depth)
-
-        # 5. Очистка (небольшое размытие для мягкого края)
-        refined_mask = cv2.GaussianBlur(refined_mask, (5, 5), 0)
-        
-        return refined_mask
+        cv2.imwrite("data/output_for_depth.jpg", depth_map)
+        logger.success('Сделана карта глубины')
 
 
 
     def without_background(self, img_path):
         logger.info('Начало обрезания фона')
+
 
         sam_cfg = "C:/Dev/MainProject2/.venv/Lib/site-packages/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
         sam_weights = "models/sam2.1_l.pt"
@@ -128,7 +96,7 @@ class ImagePreprocessor:
         # mask = ndimage.binary_fill_holes(mask)
         mask = mask.astype(np.uint8)
 
-        mask = self.refine_mask_with_depth(image, mask, boxes[0])
+        # mask = self.refine_mask_with_depth(image, mask, boxes[0])
 
 
 
@@ -139,17 +107,17 @@ class ImagePreprocessor:
 
 
 
-        # kernel = np.ones((3, 3), np.uint8)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-        # contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        # filled_mask = np.zeros_like(mask)
-        # cv2.drawContours(filled_mask, contours=contours, contourIdx=-1, color=255, thickness=cv2.FILLED)
-        # mask = (filled_mask / 255.0)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        filled_mask = np.zeros_like(mask)
+        cv2.drawContours(filled_mask, contours=contours, contourIdx=-1, color=255, thickness=cv2.FILLED)
+        mask = (filled_mask / 255.0)
 
-        # blur_size = 5
-        # mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
+        blur_size = 5
+        mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
         
         # logger.success(f"{x1}, {y1}, {x2}, {y2}")
 
